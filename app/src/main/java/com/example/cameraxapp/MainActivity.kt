@@ -30,11 +30,8 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.nio.ByteBuffer
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
-
 
 typealias LumaListener = (Double) -> Unit
 
@@ -53,6 +50,7 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 var hasPermission by remember { mutableStateOf(false) }
                 var lumaValue by remember { mutableStateOf(0.0) }
+                var faceRetouchEnabled by remember { mutableStateOf(true) }
 
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -82,10 +80,25 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxSize()
                                 .padding(contentPadding)
                         ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Face Retouch")
+                                Switch(
+                                    checked = faceRetouchEnabled,
+                                    onCheckedChange = {
+                                        faceRetouchEnabled = it
+                                    }
+                                )
+                            }
+
                             AndroidView(
                                 factory = { ctx ->
                                     val previewView = PreviewView(ctx)
-                                    startCamera(previewView, onLumaChanged = { lumaValue = it })
+                                    startCamera(previewView, faceRetouchEnabled) { lumaValue = it }
                                     previewView
                                 },
                                 modifier = Modifier
@@ -94,7 +107,7 @@ class MainActivity : ComponentActivity() {
                             )
 
                             Text(
-                                text = "🩷 Brightness: ${"%.2f".format(lumaValue)}",
+                                text = "Brightness: ${"%.2f".format(lumaValue)}",
                                 modifier = Modifier.padding(16.dp)
                             )
 
@@ -119,61 +132,64 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    private fun startCamera(previewView: PreviewView, onLumaChanged: (Double) -> Unit) {
+    private fun startCamera(
+        previewView: PreviewView,
+        useRetouch: Boolean,
+        onLumaChanged: (Double) -> Unit
+    ) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-
-            val extensionsManagerFuture =
-                ExtensionsManager.getInstanceAsync(this, cameraProvider)
+            val cameraProvider = cameraProviderFuture.get()
+            val extensionsManagerFuture = ExtensionsManager.getInstanceAsync(this, cameraProvider)
 
             extensionsManagerFuture.addListener({
                 val extensionsManager = extensionsManagerFuture.get()
-                val baseCameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+                val baseSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+                val extensionMode = ExtensionMode.FACE_RETOUCH
 
-                if (extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)) {
-                    try {
-                        cameraProvider.unbindAll()
-
-                        val faceRetouchSelector = extensionsManager.getExtensionEnabledCameraSelector(
-                            baseCameraSelector, ExtensionMode.FACE_RETOUCH
-                        )
-
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
-
-                        imageCapture = ImageCapture.Builder().build()
-
-                        val imageAnalyzer = ImageAnalysis.Builder()
-                            .build()
-                            .also {
-                                it.setAnalyzer(cameraExecutor, LuminosityAnalyzer { luma ->
-                                    onLumaChanged(luma)
-                                    Log.d(TAG, "Average luminosity: $luma")
-                                })
-                            }
-
-                        cameraProvider.bindToLifecycle(
-                            this,
-                            faceRetouchSelector,
-                            preview,
-                            imageCapture,
-                            imageAnalyzer
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Use case binding failed", e)
-                    }
+                val selector = if (useRetouch &&
+                    extensionsManager.isExtensionAvailable(baseSelector, extensionMode)
+                ) {
+                    Log.i(TAG, "Face Retouch extension is ACTIVE")
+                    extensionsManager.getExtensionEnabledCameraSelector(baseSelector, extensionMode)
                 } else {
-                    Toast.makeText(this, "Face Retouch not supported on this device", Toast.LENGTH_SHORT).show()
+                    Log.i(TAG, "Face Retouch NOT available  Using default front camera")
+                    baseSelector
                 }
-            }, ContextCompat.getMainExecutor(this))
 
+                bindCamera(cameraProvider, selector, previewView, onLumaChanged)
+            }, ContextCompat.getMainExecutor(this))
         }, ContextCompat.getMainExecutor(this))
     }
 
+        private fun bindCamera(
+        cameraProvider: ProcessCameraProvider,
+        cameraSelector: CameraSelector,
+        previewView: PreviewView,
+        onLumaChanged: (Double) -> Unit
+    ) {
+        cameraProvider.unbindAll()
+
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+
+        imageCapture = ImageCapture.Builder().build()
+
+        val imageAnalyzer = ImageAnalysis.Builder().build().also {
+            it.setAnalyzer(cameraExecutor, LuminosityAnalyzer { luma ->
+                onLumaChanged(luma)
+                Log.d(TAG, "Average luminosity: $luma")
+            })
+        }
+
+        try {
+            cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture, imageAnalyzer)
+        } catch (e: Exception) {
+            Log.e(TAG, "Binding failed: ${e.message}", e)
+        }
+    }
 
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return
@@ -232,7 +248,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private class LuminosityAnalyzer(private val listener: LumaListener) : ImageAnalysis.Analyzer {
-
         private fun ByteBuffer.toByteArray(): ByteArray {
             rewind()
             val data = ByteArray(remaining())
@@ -245,9 +260,7 @@ class MainActivity : ComponentActivity() {
             val data = buffer.toByteArray()
             val pixels = data.map { it.toInt() and 0xFF }
             val luma = pixels.average()
-
             listener(luma)
-
             image.close()
         }
     }
