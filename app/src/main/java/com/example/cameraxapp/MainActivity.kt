@@ -34,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
+import java.nio.charset.Charset.isSupported
 
 
 typealias LumaListener = (Double) -> Unit
@@ -132,48 +133,55 @@ class MainActivity : ComponentActivity() {
             extensionsManagerFuture.addListener({
                 val extensionsManager = extensionsManagerFuture.get()
                 val baseCameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+                val isSupported = extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
+                Log.d("EXTENSION_CHECK", "Face Retouch supported: $isSupported")
 
-                if (extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)) {
-                    try {
-                        cameraProvider.unbindAll()
+                Log.d("EXTENSION_CHECK", "Face Retouch supported: $isSupported")
 
-                        val faceRetouchSelector = extensionsManager.getExtensionEnabledCameraSelector(
-                            baseCameraSelector, ExtensionMode.FACE_RETOUCH
-                        )
 
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView.surfaceProvider)
-                        }
 
-                        imageCapture = ImageCapture.Builder().build()
 
-                        val imageAnalyzer = ImageAnalysis.Builder()
-                            .build()
-                            .also {
-                                it.setAnalyzer(cameraExecutor, LuminosityAnalyzer { luma ->
-                                    onLumaChanged(luma)
-                                    Log.d(TAG, "Average luminosity: $luma")
-                                })
-                            }
-
-                        cameraProvider.bindToLifecycle(
-                            this,
-                            faceRetouchSelector,
-                            preview,
-                            imageCapture,
-                            imageAnalyzer
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Use case binding failed", e)
-                    }
+                val cameraSelector = if (
+                    extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
+                ) {
+                    extensionsManager.getExtensionEnabledCameraSelector(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
                 } else {
                     Toast.makeText(this, "Face Retouch not supported on this device", Toast.LENGTH_SHORT).show()
+                    baseCameraSelector
+                }
+
+                try {
+                    cameraProvider.unbindAll()
+
+                    val preview = Preview.Builder().build().also {
+                        it.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+
+                    imageCapture = ImageCapture.Builder().build()
+
+                    val imageAnalyzer = ImageAnalysis.Builder()
+                        .build()
+                        .also {
+                            it.setAnalyzer(cameraExecutor, LuminosityAnalyzer { luma ->
+                                onLumaChanged(luma)
+                                Log.d(TAG, "Average luminosity: $luma")
+                            })
+                        }
+
+                    cameraProvider.bindToLifecycle(
+                        this,
+                        cameraSelector,
+                        preview,
+                        imageCapture,
+                        imageAnalyzer
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Use case binding failed", e)
                 }
             }, ContextCompat.getMainExecutor(this))
 
         }, ContextCompat.getMainExecutor(this))
     }
-
 
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return

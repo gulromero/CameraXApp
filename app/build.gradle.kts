@@ -61,7 +61,9 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 
-    val cameraxVersion = "1.2.2"
+    // CameraX version downgraded to (try) and fix Face Retouch issue
+    val cameraxVersion = "1.3.2"
+
 
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
@@ -70,5 +72,12 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.camera:camera-extensions:$cameraxVersion")
 
+}
 
+configurations.all {
+    resolutionStrategy.eachDependency {
+        if (requested.group == "androidx.camera") {
+            useVersion("1.3.2")
+        }
+    }
 }
