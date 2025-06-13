@@ -1,10 +1,13 @@
 package com.example.cameraxapp
 
 import android.Manifest
+import android.content.ContentValues
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -29,7 +32,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.cameraxapp.ui.theme.CameraXAppTheme
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.Arrays.stream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -98,7 +105,7 @@ class MainActivity : ComponentActivity() {
 
                             Button(
                                 onClick = {
-                                    takePhotoInMemory { bitmap ->
+                                    takePhotoInMemory(context) { bitmap ->
                                         capturedBitmap = bitmap
                                     }
                                 },
@@ -110,14 +117,24 @@ class MainActivity : ComponentActivity() {
                             }
 
                             capturedBitmap?.let {
-                                Image(
-                                    bitmap = it.asImageBitmap(),
-                                    contentDescription = "Captured Photo",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .aspectRatio(1f)
-                                        .padding(16.dp)
-                                )
+                                Column {
+                                    Image(
+                                        bitmap = it.asImageBitmap(),
+                                        contentDescription = "Captured Photo",
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(1f)
+                                            .padding(16.dp)
+                                    )
+                                    Button(
+                                        onClick = { capturedBitmap = null },
+                                        modifier = Modifier
+                                            .padding(horizontal = 16.dp)
+                                            .fillMaxWidth()
+                                    ) {
+                                        Text("Go back")
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -187,15 +204,16 @@ class MainActivity : ComponentActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun takePhotoInMemory(onPhotoCaptured: (Bitmap) -> Unit) {
+    private fun takePhotoInMemory(context: Context, onPhotoCaptured: (Bitmap) -> Unit) {
         val imageCapture = imageCapture ?: return
 
         imageCapture.takePicture(
-            ContextCompat.getMainExecutor(this),
+            ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
-                    val bitmap = image.toBitmap()
+                    val bitmap = image.toBitmap().rotate(270f)
                     image.close()
+                    saveBitmapToGallery(context, bitmap)
                     onPhotoCaptured(bitmap)
                 }
 
@@ -206,7 +224,37 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun allPermissionsGranted(context: android.content.Context) =
+    private fun saveBitmapToGallery(context: Context, bitmap: Bitmap) {
+        val filename = "CameraXApp_${System.currentTimeMillis()}.jpg"
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "DCIM/CameraXApp")
+            }
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+
+        if (uri != null) {
+            val stream = resolver.openOutputStream(uri)
+
+            if (stream != null) {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 100, stream)
+                stream.flush()
+                stream.close()
+                Toast.makeText(context, "Saved to Gallery!!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Failed to open stream", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "Failed to create MediaStore entry", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+
+    private fun allPermissionsGranted(context: Context) =
         REQUIRED_PERMISSIONS.all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
@@ -273,4 +321,9 @@ private fun ImageProxy.toBitmap(): Bitmap {
     val imageBytes = out.toByteArray()
 
     return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+}
+
+fun Bitmap.rotate(degrees: Float): Bitmap {
+    val matrix = Matrix().apply { postRotate(degrees) }
+    return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
 }
