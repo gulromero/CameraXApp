@@ -1,41 +1,37 @@
 package com.example.cameraxapp
 
 import android.Manifest
-import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.graphics.*
 import android.os.Build
 import android.os.Bundle
-import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.cameraxapp.ui.theme.CameraXAppTheme
-import java.text.SimpleDateFormat
-import java.util.*
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.nio.ByteBuffer
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.camera.extensions.ExtensionMode
-import androidx.camera.extensions.ExtensionsManager
-import java.nio.charset.Charset.isSupported
-
 
 typealias LumaListener = (Double) -> Unit
 
@@ -51,6 +47,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             CameraXAppTheme {
+                var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
                 val context = LocalContext.current
                 var hasPermission by remember { mutableStateOf(false) }
                 var lumaValue by remember { mutableStateOf(0.0) }
@@ -100,12 +97,27 @@ class MainActivity : ComponentActivity() {
                             )
 
                             Button(
-                                onClick = { takePhoto() },
+                                onClick = {
+                                    takePhotoInMemory { bitmap ->
+                                        capturedBitmap = bitmap
+                                    }
+                                },
                                 modifier = Modifier
                                     .padding(16.dp)
                                     .fillMaxWidth()
                             ) {
                                 Text("Take Photo")
+                            }
+
+                            capturedBitmap?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = "Captured Photo",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(1f)
+                                        .padding(16.dp)
+                                )
                             }
                         }
                     } else {
@@ -134,16 +146,9 @@ class MainActivity : ComponentActivity() {
                 val extensionsManager = extensionsManagerFuture.get()
                 val baseCameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
                 val isSupported = extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
-                Log.d("EXTENSION_CHECK", "Face Retouch supported: $isSupported")
+                Log.d(TAG, "Face Retouch supported: $isSupported")
 
-                Log.d("EXTENSION_CHECK", "Face Retouch supported: $isSupported")
-
-
-
-
-                val cameraSelector = if (
-                    extensionsManager.isExtensionAvailable(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
-                ) {
+                val cameraSelector = if (isSupported) {
                     extensionsManager.getExtensionEnabledCameraSelector(baseCameraSelector, ExtensionMode.FACE_RETOUCH)
                 } else {
                     Toast.makeText(this, "Face Retouch not supported on this device", Toast.LENGTH_SHORT).show()
@@ -179,47 +184,32 @@ class MainActivity : ComponentActivity() {
                     Log.e(TAG, "Use case binding failed", e)
                 }
             }, ContextCompat.getMainExecutor(this))
-
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun takePhoto() {
+    private fun takePhotoInMemory(onPhotoCaptured: (Bitmap) -> Unit) {
         val imageCapture = imageCapture ?: return
 
-        val name = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
-            .format(System.currentTimeMillis())
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
-            }
-        }
-
-        val outputOptions = ImageCapture.OutputFileOptions
-            .Builder(contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-            .build()
-
         imageCapture.takePicture(
-            outputOptions,
             ContextCompat.getMainExecutor(this),
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onError(exc: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val bitmap = image.toBitmap()
+                    image.close()
+                    onPhotoCaptured(bitmap)
                 }
 
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val msg = "Photo capture succeeded: ${output.savedUri}"
-                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
-                    Log.d(TAG, msg)
+                override fun onError(exception: ImageCaptureException) {
+                    Log.e(TAG, "Capture failed: ${exception.message}", exception)
                 }
             }
         )
     }
 
-    private fun allPermissionsGranted(context: android.content.Context) = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun allPermissionsGranted(context: android.content.Context) =
+        REQUIRED_PERMISSIONS.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -259,4 +249,28 @@ class MainActivity : ComponentActivity() {
             image.close()
         }
     }
+}
+
+// Extension to convert ImageProxy to Bitmap
+private fun ImageProxy.toBitmap(): Bitmap {
+    val yBuffer = planes[0].buffer
+    val uBuffer = planes[1].buffer
+    val vBuffer = planes[2].buffer
+
+    val ySize = yBuffer.remaining()
+    val uSize = uBuffer.remaining()
+    val vSize = vBuffer.remaining()
+
+    val nv21 = ByteArray(ySize + uSize + vSize)
+
+    yBuffer.get(nv21, 0, ySize)
+    vBuffer.get(nv21, ySize, vSize)
+    uBuffer.get(nv21, ySize + vSize, uSize)
+
+    val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+    val out = ByteArrayOutputStream()
+    yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
+    val imageBytes = out.toByteArray()
+
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
 }
